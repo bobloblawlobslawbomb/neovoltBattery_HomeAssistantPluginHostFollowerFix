@@ -208,14 +208,29 @@ class ByteWattConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     @staticmethod
     @callback
     def async_get_options_flow(config_entry):
-        return ByteWattOptionsFlowHandler(config_entry)
+        # No argument: OptionsFlow.config_entry is set by the base class from
+        # the entry this flow was created for. Passing it to a custom __init__
+        # that assigns self.config_entry raises AttributeError on HA 2025.12+.
+        return ByteWattOptionsFlowHandler()
 
 
 class ByteWattOptionsFlowHandler(config_entries.OptionsFlow):
-    """Options: scan interval only."""
+    """Options: scan interval only.
 
-    def __init__(self, config_entry):
-        self.config_entry = config_entry
+    Deliberately has NO __init__. Assigning ``self.config_entry`` used to be
+    the norm, but HA made ``OptionsFlow.config_entry`` a read-only property:
+    the base class sets it from the entry passed to async_get_options_flow.
+    Assigning it was deprecated in 2024.11 (logging a warning) and started
+    raising in 2025.12:
+
+        AttributeError: property 'config_entry' of
+        'ByteWattOptionsFlowHandler' object has no setter
+
+    That exception is raised inside async_create_flow, so the frontend never
+    receives a form and shows "Config flow could not be loaded: 500 Internal
+    Server Error" when the user clicks the cog. ``self.config_entry`` is still
+    available below — it is just inherited rather than assigned.
+    """
 
     async def async_step_init(self, user_input=None):
         if user_input is not None:

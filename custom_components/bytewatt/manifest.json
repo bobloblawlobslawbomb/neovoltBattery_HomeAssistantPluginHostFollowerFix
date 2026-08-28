@@ -9,5 +9,5 @@
   "issue_tracker": "https://github.com/bobloblawlobslawbomb/neovoltBattery_HomeAssistantPluginHostFollowerFix/issues",
   "min_ha_version": "2024.11.0",
   "requirements": ["pycryptodome>=3.18.0"],
-  "version": "1.2.1"
+  "version": "1.2.2"
 }

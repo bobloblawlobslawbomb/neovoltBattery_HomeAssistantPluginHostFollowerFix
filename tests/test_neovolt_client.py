@@ -27,11 +27,33 @@ def _load_module(rel_path: str, name: str):
 
 # neovolt_client imports homeassistant.helpers.aiohttp_client at module load —
 # skip cleanly when HA isn't installed (bare sandbox).
+#
+# It also does `from .neovolt_auth import ...`, a RELATIVE import, which needs a
+# parent package. Loading the file standalone raises plain ImportError
+# ("attempted relative import with no known parent package"), NOT
+# ModuleNotFoundError — so catching only the latter turned a skip into a hard
+# collection error. Register a synthetic parent package so the relative import
+# resolves, and catch ImportError (the superclass) as a backstop.
 try:
-    neovolt_auth = _load_module("api/neovolt_auth.py", "bytewatt_neovolt_auth")
-    neovolt_client = _load_module("api/neovolt_client.py", "bytewatt_neovolt_client")
-except ModuleNotFoundError as exc:
-    pytest.skip(f"Module not installed in this environment: {exc.name}", allow_module_level=True)
+    import sys as _sys
+    import types as _types
+
+    _PKG = "bytewatt_api_under_test"
+    if _PKG not in _sys.modules:
+        _pkg = _types.ModuleType(_PKG)
+        _pkg.__path__ = [os.path.abspath(os.path.join(
+            os.path.dirname(__file__), "..", "custom_components", "bytewatt", "api"))]
+        _sys.modules[_PKG] = _pkg
+
+    neovolt_auth = _load_module("api/neovolt_auth.py", f"{_PKG}.neovolt_auth")
+    _sys.modules[f"{_PKG}.neovolt_auth"] = neovolt_auth
+    neovolt_client = _load_module("api/neovolt_client.py", f"{_PKG}.neovolt_client")
+except ImportError as exc:
+    pytest.skip(
+        f"Module not importable in this environment: "
+        f"{getattr(exc, 'name', None) or exc}",
+        allow_module_level=True,
+    )
 
 EncryptionError = neovolt_auth.EncryptionError
 encrypt_password = neovolt_auth.encrypt_password

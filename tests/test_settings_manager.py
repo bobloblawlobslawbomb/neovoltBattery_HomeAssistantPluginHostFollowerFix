@@ -10,9 +10,29 @@ import pytest
 
 # SettingsManager imports homeassistant.helpers.dispatcher; skip cleanly
 # if HA isn't installed (bare dev sandbox). Same for pycryptodome.
+#
+# NB: plain importorskip("homeassistant") is NOT sufficient — sibling test
+# modules inject partial FAKE homeassistant modules into sys.modules to test
+# the client/config-flow without HA, and those fakes satisfy the import while
+# lacking homeassistant.components. conftest.REAL_HA probes for a genuine
+# install before any stubbing happens.
 pytest.importorskip("Crypto.Cipher")
 pytest.importorskip("voluptuous")
-pytest.importorskip("homeassistant")
+
+# Probe for the REAL package rather than trusting sys.modules.
+import importlib.util  # noqa: E402
+
+try:
+    _REAL_HA = importlib.util.find_spec("homeassistant.components") is not None
+except (ImportError, AttributeError, ValueError):
+    _REAL_HA = False
+
+if not _REAL_HA:
+    pytest.skip(
+        "requires a real Home Assistant install (stubs don't provide "
+        "homeassistant.components)",
+        allow_module_level=True,
+    )
 
 from custom_components.bytewatt.models import (  # noqa: E402
     CycleStrategy,
