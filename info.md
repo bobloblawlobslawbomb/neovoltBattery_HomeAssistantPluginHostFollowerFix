@@ -1,6 +1,14 @@
-# Byte-Watt Battery Monitor
+# Byte-Watt Battery Monitor (Host/Follower Fix)
 
 Monitor and control your Byte-Watt / Neovolt battery system through Home Assistant.
+
+**Fork of [candreacchio/neovoltBattery_HomeAssistantPlugin](https://github.com/candreacchio/neovoltBattery_HomeAssistantPlugin)**
+that fixes understated battery State of Charge on multi-inverter
+(host/follower) systems. Real-time data is read from the Host inverter rather
+than a capacity-weighted pool across every inverter on the account.
+
+Keeps the `bytewatt` domain — a drop-in replacement that preserves existing
+config entries, entity IDs and history. Install this **or** upstream, not both.
 
 Requires Home Assistant **2024.11.0** or later.
 
@@ -8,10 +16,10 @@ Requires Home Assistant **2024.11.0** or later.
 ## Integration is installed
 
 **To configure:** Settings → Devices & Services → Add Integration → search for
-"Byte-Watt Battery Monitor" and follow the prompts.
+"Byte-Watt" and follow the prompts.
 
 If you have more than one inverter on your account you'll be asked to pick the
-Host inverter (used for Grid Feed-in and cycle strategy control).
+Host inverter (used for real-time data, Grid Feed-in and cycle strategy control).
 {% endif %}
 
 ## Features

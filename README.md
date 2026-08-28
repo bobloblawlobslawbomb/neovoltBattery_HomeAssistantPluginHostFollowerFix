@@ -1,13 +1,30 @@
-# Byte-Watt Battery Monitor Integration for Home Assistant
+# Byte-Watt Battery Monitor (Host/Follower Fix)
 
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://github.com/custom-components/hacs)
 
 Monitor and control a Byte-Watt / Neovolt battery system from Home Assistant.
 
+> **This is a fork** of
+> [candreacchio/neovoltBattery_HomeAssistantPlugin](https://github.com/candreacchio/neovoltBattery_HomeAssistantPlugin)
+> that fixes **understated battery State of Charge on multi-inverter
+> (host/follower) systems**. Upstream requests real-time data with
+> `sysSn=All`, which returns a capacity-weighted energy pool across every
+> inverter on the account — so a second inverter reporting 0 % (or
+> advertising capacity it does not have) drags the SoC well below its true
+> value. This fork scopes the real-time request to the Host inverter,
+> matching what the Neovolt mobile app shows. See
+> [v1.2.0](../../releases/tag/v1.2.0) for the full analysis.
+>
+> It keeps the `bytewatt` domain, so it is a drop-in replacement: existing
+> config entries, entity IDs and history carry over unchanged. Install this
+> **or** upstream, not both.
+
 Requires Home Assistant **2024.11.0** or later.
 
 ## Features
 
+- **Correct SoC on multi-inverter systems** — real-time data is read from the
+  Host inverter instead of a capacity-weighted pool across all inverters
 - **Real-time monitoring** — SOC, grid / house / PV / battery power flows
 - **Cumulative + today's energy** — solar generation, feed-in, grid import, charge / discharge
 - **Battery control** — charge / discharge time windows, minimum SOC, charge cap,
@@ -25,10 +42,16 @@ Requires Home Assistant **2024.11.0** or later.
 
 ### HACS (recommended)
 
+> If you already have the upstream **Byte-Watt Battery Monitor** installed,
+> remove it from HACS first — both use the `bytewatt` domain and cannot be
+> installed side by side. Removing it in HACS only deletes files; do **not**
+> delete the integration from Settings → Devices & Services, or you will lose
+> your credentials, entity IDs and history.
+
 1. Install [HACS](https://hacs.xyz/) if you haven't already.
 2. HACS → Integrations → ⋮ → Custom repositories → add this repo URL → Category: Integration.
-3. Install **Byte-Watt Battery Monitor** and restart Home Assistant.
-4. Settings → Devices & Services → Add Integration → search for **Byte-Watt Battery Monitor**.
+3. Install **Byte-Watt Battery Monitor (Host/Follower Fix)** and restart Home Assistant.
+4. Settings → Devices & Services → Add Integration → search for **Byte-Watt**.
 
 ### Manual
 
