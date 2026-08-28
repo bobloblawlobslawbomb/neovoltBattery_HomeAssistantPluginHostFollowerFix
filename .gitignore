@@ -2,4 +2,4 @@
 /TestData/
 *.pyc
 .env
-.vscode/
+.vscode/.venv/

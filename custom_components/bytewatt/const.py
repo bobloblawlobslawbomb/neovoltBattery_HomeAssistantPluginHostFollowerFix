@@ -101,7 +101,7 @@ CONF_HOST_SYS_SN = "host_sys_sn"
 
 # Config entry schema version — bump and add an async_migrate_entry branch
 # whenever you change the shape of entry.data.
-CURRENT_ENTRY_VERSION = 2
+CURRENT_ENTRY_VERSION = 3
 
 # Maximum number of feed-in slots the inverter supports (per the
 # timePeriodLimit field on getFeedStrategyList — confirmed against a HAR

@@ -47,7 +47,7 @@
   "issues": {
     "host_inverter_required": {
       "title": "Host inverter not configured",
-      "description": "This Byte-Watt account has more than one inverter and no Host inverter has been selected. Grid Feed-in controls will not work until a Host is picked. Open Settings → Devices & Services, find the Byte-Watt entry, click the three-dot menu and choose Reconfigure."
+      "description": "This Byte-Watt account has more than one inverter and no Host inverter has been selected. Until a Host is picked, battery State of Charge is reported as a capacity-weighted pool across ALL inverters — so a second inverter that reports 0% (or advertises capacity it does not have) will drag the reading well below the true value. Grid Feed-in controls will also not work. Open Settings → Devices & Services, find the Byte-Watt entry, click the three-dot menu and choose Reconfigure."
     }
   }
 }

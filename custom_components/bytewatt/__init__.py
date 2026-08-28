@@ -226,6 +226,14 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     Host inverter selection step was added). Try to populate them
     automatically when only one inverter exists; otherwise raise a repair
     issue prompting the user to reconfigure.
+    v2 → v3: the real-time endpoint is now queried by the Host inverter's
+    SERIAL (``host_sys_sn``) rather than ``sysSn=All``. v2 entries created
+    by the Host-selection step stored the serial already, but any entry
+    that reached v2 through the *auto-migration* path with a login failure
+    — or was written before the serial was persisted alongside the id —
+    can carry a ``host_system_id`` with an EMPTY ``host_sys_sn``. Those
+    entries would silently fall back to the broken aggregate behaviour, so
+    backfill the serial by looking the id up on the account.
     """
     _LOGGER.info("Migrating ByteWatt entry from v%s to v%s", entry.version, CURRENT_ENTRY_VERSION)
 
@@ -294,6 +302,57 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             entry,
             data=new_data,
             unique_id=unique_id,
+            version=2,
+        )
+
+    if entry.version < 3:
+        new_data = dict(entry.data)
+
+        # Only entries that HAVE a host but LACK its serial need work. A
+        # genuinely host-less entry (single inverter / user never picked one)
+        # is left alone — the client falls back to sysSn=All for it, which is
+        # correct when there is only one inverter.
+        if new_data.get(CONF_HOST_SYSTEM_ID) and not new_data.get(CONF_HOST_SYS_SN):
+            _LOGGER.info(
+                "Entry has host_system_id but no host_sys_sn — looking up the "
+                "serial so real-time data can be scoped to the Host inverter"
+            )
+            client = ByteWattClient(
+                hass,
+                new_data[CONF_USERNAME],
+                new_data[CONF_PASSWORD],
+            )
+            try:
+                if await client.initialize():
+                    for inv in await client.fetch_inverter_list():
+                        if inv.get("systemId") == new_data[CONF_HOST_SYSTEM_ID]:
+                            new_data[CONF_HOST_SYS_SN] = inv.get("sysSn", "")
+                            _LOGGER.info(
+                                "Backfilled host serial %s", new_data[CONF_HOST_SYS_SN]
+                            )
+                            break
+                    else:
+                        _LOGGER.warning(
+                            "Configured host_system_id %s is no longer on the "
+                            "account; reconfigure to pick the Host inverter",
+                            new_data[CONF_HOST_SYSTEM_ID],
+                        )
+                else:
+                    _LOGGER.warning(
+                        "Could not log in to backfill the host serial; real-time "
+                        "data stays aggregated until the next restart or reconfigure"
+                    )
+            except Exception as ex:  # noqa: BLE001 — migration must never crash
+                _LOGGER.warning("Could not backfill the host serial: %s", ex)
+
+            # Prompt the user if it still could not be resolved — without the
+            # serial the SoC/power readings remain averaged across inverters.
+            if not new_data.get(CONF_HOST_SYS_SN):
+                _create_host_inverter_repair_issue(hass, entry.entry_id)
+
+        hass.config_entries.async_update_entry(
+            entry,
+            data=new_data,
             version=CURRENT_ENTRY_VERSION,
         )
 

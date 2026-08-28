@@ -258,7 +258,49 @@ class NeovoltClient:
         # First get the real-time power data — failures of THIS call raise.
         url = f"{self.base_url}/api/report/energyStorage/getLastPowerData"
 
-        params = {"sysSn": "All", "stationId": station_id or ""}
+        # HOST/FOLLOWER FIX
+        # ----------------
+        # `sysSn=All` makes the server return a CAPACITY-WEIGHTED ENERGY POOL
+        # across every inverter on the account — not an average of percentages:
+        #
+        #   soc_All = sum(soc_i * cobat_i) / sum(cobat_i)
+        #
+        # On a host/follower install the follower can advertise capacity it
+        # does not actually have while reporting soc = 0 %, which drags the
+        # pooled figure well below the real state of charge. Measured live on
+        # a 2-inverter system (capacities from getCustomMenuEssList.cobat):
+        #
+        #   host 63.90 % @ 50.40 kWh, follower 0.0 % @ 30.24 kWh
+        #     -> (63.90*50.40 + 0*30.24) / 80.64 = 39.94 %   (API returned 39.94)
+        #
+        # The mobile app shows the HOST value, so match it by querying the
+        # host serial directly.
+        #
+        # Do NOT "fix" this by rescaling: the implied factor
+        # cobat_host/sum(cobat) = 50.40/80.64 = 0.625 holds ONLY while the
+        # follower reads 0 %, and drifts as soon as it reports anything else.
+        #
+        # Only `soc` is distorted. The power fields (pbat/ppv/pload/pgrid) are
+        # summed across inverters, and a 0 W follower contributes nothing, so
+        # they read identically under either scope (verified live: 1505 W).
+        #
+        # Falls back to the previous behaviour when no host is configured
+        # (single-inverter installs, or entries predating the host selector).
+        #
+        # NOTE: the statistics endpoints below are station-scoped totals and
+        # are deliberately left on `All` — narrowing them to the host serial
+        # would UNDER-report any energy the follower genuinely contributed.
+        sys_sn = self.host_sys_sn or "All"
+        if not self.host_sys_sn:
+            _LOGGER.debug(
+                "No host_sys_sn configured — querying getLastPowerData with "
+                "sysSn=All. On a multi-inverter system this returns a "
+                "capacity-weighted pool across all inverters, which understates "
+                "SoC when a follower reports 0 %%; reconfigure the integration "
+                "to select the Host inverter if the reading looks wrong."
+            )
+
+        params = {"sysSn": sys_sn, "stationId": station_id or ""}
 
         current_date = dt_util.now().strftime("%Y-%m-%d %H:%M:%S")
         headers = self._get_auth_headers()
