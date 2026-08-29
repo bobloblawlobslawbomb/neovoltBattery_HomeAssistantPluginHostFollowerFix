@@ -440,7 +440,7 @@ class ByteWattDataUpdateCoordinator(DataUpdateCoordinator):
             "timestamp": recovery_start_ts.isoformat(),
         })
 
-        if self._notify_on_recovery:
+        if self._notify_on_recovery and not is_scheduled:
             async_create(
                 self.hass,
                 f"ByteWatt integration is attempting to reconnect ({recovery_type} recovery)",
@@ -474,14 +474,27 @@ class ByteWattDataUpdateCoordinator(DataUpdateCoordinator):
                     "success": True,
                     "timestamp": dt_util.utcnow().isoformat(),
                 })
+                # Only tell the user about recovery from an ACTUAL problem.
+                #
+                # The 03:30 auto-reconnect is routine maintenance that runs on a
+                # perfectly healthy connection, so announcing "successfully
+                # reconnected" every morning was pure noise — a daily
+                # notification reporting that nothing was wrong. Worse, it
+                # trains users to dismiss ByteWatt notifications, so the ones
+                # that DO matter get ignored.
+                #
+                # A scheduled reconnect still dismisses any stale error/recovery
+                # notification left over from an earlier real failure, so the UI
+                # ends up correct either way — it just doesn't shout about it.
                 if self._notify_on_recovery:
                     async_dismiss(self.hass, NOTIFICATION_RECOVERY)
-                    async_create(
-                        self.hass,
-                        "ByteWatt integration successfully reconnected to the API",
-                        title="ByteWatt Recovery Success",
-                        notification_id=NOTIFICATION_RECOVERY,
-                    )
+                    if not is_scheduled:
+                        async_create(
+                            self.hass,
+                            "ByteWatt integration successfully reconnected to the API",
+                            title="ByteWatt Recovery Success",
+                            notification_id=NOTIFICATION_RECOVERY,
+                        )
             else:
                 # Refresh "completed" without advancing last_successful_update
                 # — the API is still broken. Surface as a failure.
