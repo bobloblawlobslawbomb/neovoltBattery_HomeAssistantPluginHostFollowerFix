@@ -32,15 +32,18 @@ from dataclasses import dataclass
 from datetime import datetime, time, timedelta
 from typing import Optional
 
-# Command changes smaller than this are suppressed. The inverter step is
-# 100 W, but the goal is to react to a genuinely good/bad stretch rather than
-# track every wobble, so the deadband is deliberately much wider than the
-# hardware resolution.
+# The inverter accepts feed-in power only in 100 W increments, so every
+# commanded value must be a multiple of this. It is a hardware constraint,
+# not a tuning knob.
 MIN_POWER_STEP_W = 100
 
 # Deadband for a routine adjustment: below this the existing cap is close
-# enough and not worth an API write.
+# enough and not worth an API write. Kept a whole multiple of the hardware
+# step — a deadband finer than the step would be meaningless (no achievable
+# change could ever fall inside it), and one that is not a multiple could
+# straddle a step boundary and suppress changes inconsistently.
 POWER_DEADBAND_W = 300
+assert POWER_DEADBAND_W % MIN_POWER_STEP_W == 0
 
 # Minimum wall-clock gap between writes to the inverter. The settings
 # endpoint is rate-limited (the reason the staged Submit button exists), and
@@ -172,11 +175,25 @@ def compute_plan(
         )
 
     raw_w = remaining_kwh / remaining_h * 1000.0
-    power_w = int(round(raw_w / MIN_POWER_STEP_W) * MIN_POWER_STEP_W)
-    power_w = max(0, min(power_w, max_power_w))
+
+    # The inverter only accepts feed-in power in 100 W increments, so
+    # quantise. Order matters: clamp FIRST, then snap to the step, so the
+    # result is guaranteed to be a valid multiple even if max_power_w is not
+    # itself a round number. Snapping before clamping would let the clamp
+    # reintroduce an invalid value.
+    clamped_w = max(0.0, min(raw_w, float(max_power_w)))
+    power_w = int(round(clamped_w / MIN_POWER_STEP_W) * MIN_POWER_STEP_W)
+    power_w = min(power_w, (max_power_w // MIN_POWER_STEP_W) * MIN_POWER_STEP_W)
+
+    # A genuine but tiny requirement (< 50 W) would round to 0, and 0 is
+    # reserved for "stop" — both in should_write() and in how the inverter
+    # reads the setting. Floor a live target to one step so "still working"
+    # never looks like "finished". The 100 W difference is immaterial.
+    if power_w == 0 and remaining_kwh > 0:
+        power_w = MIN_POWER_STEP_W
 
     if raw_w > max_power_w:
-        reason = (f"Capped at {max_power_w} W — need {raw_w:.0f} W for "
+        reason = (f"Capped at {power_w} W — need {raw_w:.0f} W for "
                   f"{remaining_kwh:.2f} kWh in {remaining_h:.2f} h")
     else:
         reason = (f"On track — {remaining_kwh:.2f} kWh over {remaining_h:.2f} h "

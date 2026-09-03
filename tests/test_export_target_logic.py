@@ -191,6 +191,99 @@ def test_pre_window_solar_is_excluded():
 
 
 # --------------------------------------------------------------------------
+# 100 W quantisation — hardware constraint
+# --------------------------------------------------------------------------
+
+def test_commanded_power_is_always_a_multiple_of_100():
+    """Sweep the whole realistic input space; every command must be valid.
+
+    The inverter rejects/handles non-multiples of 100 W unpredictably, so this
+    is a hard contract rather than a nicety.
+    """
+    from datetime import timedelta
+
+    checked = 0
+    for target in (0.5, 1.0, 3.3, 7.77, 12.0, 15.5, 40.0, 100.0):
+        for minutes_in in range(0, 182, 7):
+            now = datetime(2026, 8, 28, 17, 59) + timedelta(minutes=minutes_in)
+            for done_frac in (0.0, 0.137, 0.5, 0.913, 1.5):
+                p = plan(now, target * done_frac, target=target)
+                assert p.power_w % 100 == 0, (
+                    f"{p.power_w} W is not a multiple of 100 "
+                    f"(target={target}, +{minutes_in}min, done={done_frac})")
+                assert p.power_w >= 0
+                checked += 1
+    assert checked > 500, "sweep did not cover enough cases"
+
+
+def test_tiny_remaining_target_floors_to_one_step_not_zero():
+    """A sub-50 W requirement must not round to 0.
+
+    0 is reserved for 'stop'. Rounding a live target down to 0 would look
+    like completion to should_write() and to the inverter, silently ending
+    the window early.
+    """
+    # 0.01 kWh left with 3 hours to go -> ~3 W raw.
+    p = plan(datetime(2026, 8, 28, 18, 0), 14.99, target=15.0)
+    assert not p.complete, "target is not met — 0.01 kWh remains"
+    assert p.power_w == 100, f"expected one step floor, got {p.power_w} W"
+
+
+def test_zero_is_reserved_for_stopping():
+    """Only a met target or an ending window may command exactly 0 W."""
+    met = plan(datetime(2026, 8, 28, 19, 0), 15.0, target=15.0)
+    assert met.power_w == 0 and met.complete
+
+    ending = plan(datetime(2026, 8, 28, 21, 0, 30), 5.0, target=15.0)
+    assert ending.power_w == 0
+
+
+def test_clamp_respects_the_step_for_odd_max_power():
+    """A non-multiple max must clamp DOWN to a valid step, never above it."""
+    p = etl.compute_plan(
+        now=datetime(2026, 8, 28, 20, 55), start=START, end=END,
+        target_kwh=99.0, feed_in_today_kwh=100.0, baseline_kwh=100.0,
+        enabled=True, max_power_w=5550)
+    assert p.power_w % 100 == 0
+    assert p.power_w <= 5550, "must never exceed the hardware maximum"
+    assert p.power_w == 5500
+
+
+def test_rounding_is_nearest_not_truncation():
+    """Round to nearest step so the average tracks the requirement.
+
+    Always truncating down would bias every command low and cause a
+    systematic undershoot across the window.
+    """
+    # 2.0 kWh over 1.0 h left = 2000 W exactly.
+    p = plan(datetime(2026, 8, 28, 20, 1), 13.0, target=15.0)
+    assert p.power_w == 2000
+
+    # Contrive ~4460 W -> nearest step is 4500, not 4400.
+    p2 = etl.compute_plan(
+        now=datetime(2026, 8, 28, 20, 1), start=START, end=END,
+        target_kwh=4.46, feed_in_today_kwh=100.0, baseline_kwh=100.0,
+        enabled=True, max_power_w=MAXW)
+    assert p2.power_w == 4500
+
+
+def test_deadband_is_a_multiple_of_the_step():
+    """A deadband that isn't a whole number of steps suppresses inconsistently."""
+    assert etl.POWER_DEADBAND_W % etl.MIN_POWER_STEP_W == 0
+
+
+def test_deadband_permits_the_smallest_meaningful_change():
+    """The deadband must not be so wide that normal corrections never happen.
+
+    It has to be reachable by a whole number of steps, and small relative to
+    typical commanded rates (a few kW), or the loop would never adjust.
+    """
+    steps = etl.POWER_DEADBAND_W // etl.MIN_POWER_STEP_W
+    assert 1 <= steps <= 5, f"deadband of {steps} steps is out of sensible range"
+    assert etl.should_write(4000, 4000 + etl.POWER_DEADBAND_W) is True
+
+
+# --------------------------------------------------------------------------
 # Write suppression
 # --------------------------------------------------------------------------
 
