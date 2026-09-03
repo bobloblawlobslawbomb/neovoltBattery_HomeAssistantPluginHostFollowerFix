@@ -15,6 +15,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .const import DOMAIN
 from .coordinator import ByteWattDataUpdateCoordinator
 from .grid_feedin import async_setup_switch_entry as _feedin_setup
+from .export_target_entities import async_setup_switch_entry as _export_target_setup
 from .settings_manager import SettingsManager, SettingsValidationError
 
 _LOGGER = logging.getLogger(__name__)
@@ -30,6 +31,7 @@ async def async_setup_entry(
     manager = hass.data[DOMAIN][config_entry.entry_id]["manager"]
 
     await _feedin_setup(hass, config_entry, async_add_entities)
+    await _export_target_setup(hass, config_entry, async_add_entities)
 
     async_add_entities([
         ByteWattGridChargeSwitch(coordinator, config_entry, manager),

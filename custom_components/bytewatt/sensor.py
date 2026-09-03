@@ -42,6 +42,8 @@ from .const import (
     SENSOR_TOTAL_BATTERY_DISCHARGE,
 )
 
+from .export_target_entities import async_setup_sensor_entry as _export_target_setup
+
 _LOGGER = logging.getLogger(__name__)
 
 async def async_setup_entry(
@@ -315,6 +317,8 @@ async def async_setup_entry(
         ),
     ]
     
+    await _export_target_setup(hass, entry, async_add_entities)
+
     async_add_entities(soc_sensors + grid_sensors + daily_stats_sensors)
 
 

@@ -19,6 +19,7 @@ from homeassistant.helpers import issue_registry as ir
 
 from .bytewatt_client import ByteWattClient
 from .coordinator import ByteWattDataUpdateCoordinator
+from .export_target import ExportTargetController
 from .settings_manager import SettingsManager, SettingsValidationError
 from .const import (
     DOMAIN,
@@ -127,10 +128,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         options=recovery_options,
     )
 
+    export_target = ExportTargetController(hass, entry, coordinator, manager)
+
     hass.data[DOMAIN][entry.entry_id] = {
         "client": client,
         "coordinator": coordinator,
         "manager": manager,
+        # Must be present BEFORE async_forward_entry_setups: the number,
+        # switch and sensor platforms look this up to build their entities.
+        "export_target": export_target,
     }
 
     # If host is now configured, clear any leftover repair issue from prior runs.
@@ -157,6 +163,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         _register_services(hass)
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+
+    # Start after the first refresh so the very first tick has real data,
+    # and after platform setup so the entities exist to render its state.
+    await export_target.async_start()
+    entry.async_on_unload(export_target.async_stop)
 
     # Reload the entry whenever the user changes options (currently just
     # scan_interval). Without this, edits via the Configure dialog would
