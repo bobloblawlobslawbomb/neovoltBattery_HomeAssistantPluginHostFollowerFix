@@ -194,110 +194,177 @@ def test_pre_window_solar_is_excluded():
 # Write suppression
 # --------------------------------------------------------------------------
 
-def test_write_suppression():
+def test_write_deadband():
+    """Small changes are not worth an API call."""
     assert etl.should_write(None, 5000) is True
     assert etl.should_write(5000, 5000) is False
-    assert etl.should_write(5000, 5050) is False, "sub-step jitter must not write"
-    assert etl.should_write(5000, 5100) is True
-    assert etl.should_write(5000, 0) is True, "stopping must take effect at once"
-    assert etl.should_write(0, 0) is False
+    assert etl.should_write(5000, 5100) is False, "100 W is inside the deadband"
+    assert etl.should_write(5000, 5250) is False
+    assert etl.should_write(5000, 5400) is True, "400 W is a real change"
+
+
+def test_write_rate_limit_30_minutes():
+    """At most one routine write per 30 minutes."""
+    from datetime import timedelta
+    t0 = datetime(2026, 8, 28, 18, 0)
+
+    # A big change, but only 10 minutes since the last write -> hold off.
+    assert etl.should_write(5000, 9000, now=t0 + timedelta(minutes=10),
+                            last_write=t0) is False
+    assert etl.should_write(5000, 9000, now=t0 + timedelta(minutes=29),
+                            last_write=t0) is False
+    # Past the interval -> allowed.
+    assert etl.should_write(5000, 9000, now=t0 + timedelta(minutes=30),
+                            last_write=t0) is True
+
+
+def test_stop_bypasses_the_rate_limit():
+    """Target met must take effect at once, not up to 30 minutes later."""
+    from datetime import timedelta
+    t0 = datetime(2026, 8, 28, 18, 0)
+    assert etl.should_write(5000, 0, now=t0 + timedelta(minutes=1),
+                            last_write=t0) is True
+    assert etl.should_write(0, 0, now=t0 + timedelta(minutes=1),
+                            last_write=t0) is False, "already stopped"
+
+
+def test_resume_from_zero_bypasses_the_rate_limit():
+    """A window opening just after a write must not idle for 30 minutes."""
+    from datetime import timedelta
+    t0 = datetime(2026, 8, 28, 17, 58)
+    assert etl.should_write(0, 4900, now=t0 + timedelta(minutes=1),
+                            last_write=t0) is True
 
 
 # --------------------------------------------------------------------------
 # End-to-end simulation
 # --------------------------------------------------------------------------
 
-def test_simulated_window_converges_on_target():
-    """Step through a whole evening at the real ~10 min sensor cadence.
+def _simulate(target, delivery_fraction, *, stall_until=None,
+              tick_minutes=5, start=datetime(2026, 8, 28, 17, 59),
+              end_dt=datetime(2026, 8, 28, 21, 1)):
+    """Run a window with the real 30-minute write limit enforced.
 
-    Models export actually delivered as 85% of the commanded cap (house load
-    and inverter losses eat the rest) to prove the loop self-corrects rather
-    than depending on the first estimate being right.
-
-    Delivery is clamped at the window end: the inverter's feed-in slot closes
-    at 21:01, so a rate commanded at 20:59 only runs for two minutes, not a
-    full tick. Not clamping it credits export that never happens.
+    Returns (exported_kwh, write_count, commanded_history). `delivery_fraction`
+    models how much of the commanded cap is actually delivered to the grid.
     """
     from datetime import timedelta
 
-    target = 12.0
     exported = 0.0
     writes = 0
-    last_cmd = None
-    t = datetime(2026, 8, 28, 17, 59)
-    end_dt = datetime(2026, 8, 28, 21, 1)
-    step = timedelta(minutes=10)
+    last_write_at = None
+    applied_w = None          # what the inverter is actually set to
+    history = []
+    t = start
+    step = timedelta(minutes=tick_minutes)
 
     while t < end_dt:
-        p = plan(t, exported, target=target)
-        if etl.should_write(last_cmd, p.power_w):
+        p = etl.compute_plan(
+            now=t, start=start.time(), end=end_dt.time(), target_kwh=target,
+            feed_in_today_kwh=100.0 + exported, baseline_kwh=100.0,
+            enabled=True, max_power_w=MAXW)
+        if etl.should_write(applied_w, p.power_w, now=t, last_write=last_write_at):
+            applied_w = p.power_w
+            last_write_at = t
             writes += 1
-            last_cmd = p.power_w
+        history.append(applied_w or 0)
+
         active_h = (min(t + step, end_dt) - t).total_seconds() / 3600
-        exported += (last_cmd or 0) * 0.85 / 1000 * active_h
+        stalled = stall_until is not None and t < stall_until
+        if not stalled:
+            exported += (applied_w or 0) * delivery_fraction / 1000 * active_h
         t += step
 
-    assert exported == pytest.approx(target, rel=0.10), (
-        f"converged to {exported:.2f} kWh against a {target} kWh target")
-    assert writes < 20, f"too many API writes ({writes}) for one window"
+    return exported, writes, history
 
 
-def test_overshoot_is_bounded_by_one_control_interval():
-    """Worst-case overshoot: target is hit just after a tick commanded power.
+def test_simulated_window_converges_with_30min_writes():
+    """A whole evening, delivering only 85% of the commanded cap.
 
-    The controller can only react at tick boundaries, so between ticks it may
-    export past the target. That excess is bounded by (commanded rate x tick
-    length) and must stay small at a 5 minute control interval — this test
-    pins that it is single-digit percent, not unbounded.
+    Proves the loop still lands near target when it may only adjust every
+    30 minutes.
+    """
+    exported, writes, _ = _simulate(12.0, 0.85)
+    assert exported == pytest.approx(12.0, rel=0.12), (
+        f"converged to {exported:.2f} kWh against a 12.0 kWh target")
+    assert writes <= 8, f"expected ~6 writes in a 3 h window, got {writes}"
+
+
+def test_write_count_is_bounded_for_a_three_hour_window():
+    """~3 h window at one write per 30 min -> a handful, not dozens."""
+    _, writes, _ = _simulate(12.0, 0.85, tick_minutes=1)
+    assert writes <= 8, f"{writes} writes is too many for a 3 h window"
+
+
+def test_overshoot_is_bounded_at_full_delivery():
+    """Worst case for overshoot: every commanded watt reaches the grid."""
+    exported, _, _ = _simulate(12.0, 1.0)
+    overshoot_pct = (exported - 12.0) / 12.0 * 100
+    assert exported >= 12.0 * 0.95, f"undershot at {exported:.2f} kWh"
+    assert overshoot_pct < 12.0, (
+        f"overshot by {overshoot_pct:.1f}% ({exported:.2f} vs 12.0 kWh)")
+
+
+def test_recovers_from_a_bad_period():
+    """Nothing exported for the first hour, then normal service resumes.
+
+    This is the case the 30-minute limit has to survive: the controller gets
+    at most two adjustments in that first hour, so it must still make up the
+    deficit rather than run out of road.
+    """
+    exported, writes, history = _simulate(
+        9.0, 0.9, stall_until=datetime(2026, 8, 28, 19, 0))
+    assert exported > 9.0 * 0.80, (
+        f"only reached {exported:.2f} of 9.0 kWh after the bad hour")
+    assert max(history) <= MAXW
+    # It must have ramped UP in response to the deficit.
+    assert max(history) > history[0], "never increased the rate to catch up"
+
+
+def test_holds_a_steady_rate_when_delivery_matches_plan():
+    """Delivery exactly as planned -> a flat rate, landing on target.
+
+    No stop command is expected here: the target is met right at the window
+    close, so the correct behaviour is to ease down slightly and finish, not
+    to cut out early.
+    """
+    exported, writes, history = _simulate(6.0, 1.0)
+    assert exported == pytest.approx(6.0, rel=0.05), (
+        f"landed on {exported:.2f} kWh against a 6.0 kWh target")
+    assert max(history) <= 2100, "should not need a high rate for an easy target"
+
+
+def test_very_good_period_ramps_down_and_stops():
+    """Solar over-delivers mid-window -> back off, then stop at the target.
+
+    Models an extra 2 kW of export the controller did not command (a sunny
+    late afternoon). Since the target counts TOTAL site export, that free
+    export must reduce what the battery is asked to contribute.
     """
     from datetime import timedelta
 
-    target = 12.0
+    target = 6.0
+    solar_w = 2000.0
     exported = 0.0
-    last_cmd = 0
+    applied = None
+    last_write = None
+    history = []
     t = datetime(2026, 8, 28, 17, 59)
     end_dt = datetime(2026, 8, 28, 21, 1)
     step = timedelta(minutes=5)
 
     while t < end_dt:
-        p = plan(t, exported, target=target)
-        last_cmd = p.power_w
+        p = etl.compute_plan(
+            now=t, start=t.replace(hour=17, minute=59).time(), end=end_dt.time(),
+            target_kwh=target, feed_in_today_kwh=100.0 + exported,
+            baseline_kwh=100.0, enabled=True, max_power_w=MAXW)
+        if etl.should_write(applied, p.power_w, now=t, last_write=last_write):
+            applied = p.power_w
+            last_write = t
+        history.append(applied or 0)
         active_h = (min(t + step, end_dt) - t).total_seconds() / 3600
-        # 100% delivery: the fastest realistic march toward the target, so
-        # this is the worst case for overshooting between ticks.
-        exported += last_cmd / 1000 * active_h
+        exported += ((applied or 0) + solar_w) / 1000 * active_h
         t += step
 
-    overshoot_pct = (exported - target) / target * 100
-    assert exported >= target * 0.98, f"undershot at {exported:.2f} kWh"
-    assert overshoot_pct < 5.0, (
-        f"overshot by {overshoot_pct:.1f}% ({exported:.2f} vs {target} kWh)")
-
-
-def test_simulation_recovers_from_a_stall():
-    """Battery contributes nothing for the first hour, then comes back.
-
-    Mirrors hitting the cutoff SOC or an outage mid-window: the controller
-    must re-spread the deficit over what's left instead of giving up.
-    """
-    from datetime import timedelta
-
-    target = 9.0
-    exported = 0.0
-    last_cmd = None
-    t = datetime(2026, 8, 28, 17, 59)
-    end_dt = datetime(2026, 8, 28, 21, 1)
-    peak_cmd = 0
-
-    while t < end_dt:
-        p = plan(t, exported, target=target)
-        last_cmd = p.power_w
-        peak_cmd = max(peak_cmd, last_cmd)
-        stalled = t < datetime(2026, 8, 28, 19, 0)
-        if not stalled:
-            exported += last_cmd * 0.9 / 1000 * (10 / 60)
-        t += timedelta(minutes=10)
-
-    assert exported > target * 0.85, (
-        f"only reached {exported:.2f} of {target} kWh after the stall")
-    assert peak_cmd <= MAXW
+    assert history[0] > history[-1], "should have ramped down as solar delivered"
+    assert history[-1] == 0, "should have stopped once the target was met"

@@ -32,9 +32,22 @@ from dataclasses import dataclass
 from datetime import datetime, time, timedelta
 from typing import Optional
 
-# Command changes smaller than this are suppressed: the inverter step is 100 W
-# and every write costs an API round trip on a rate-limited endpoint.
+# Command changes smaller than this are suppressed. The inverter step is
+# 100 W, but the goal is to react to a genuinely good/bad stretch rather than
+# track every wobble, so the deadband is deliberately much wider than the
+# hardware resolution.
 MIN_POWER_STEP_W = 100
+
+# Deadband for a routine adjustment: below this the existing cap is close
+# enough and not worth an API write.
+POWER_DEADBAND_W = 300
+
+# Minimum wall-clock gap between writes to the inverter. The settings
+# endpoint is rate-limited (the reason the staged Submit button exists), and
+# the control loop only needs to correct for sustained over/under-delivery,
+# not minute-to-minute noise. A ~3 hour window therefore sees at most ~6
+# writes.
+MIN_WRITE_INTERVAL = timedelta(minutes=30)
 
 # Below this, treat the window as effectively over. Dividing a residual target
 # by a near-zero remaining time explodes toward the clamp for no benefit.
@@ -176,16 +189,51 @@ def compute_plan(
     )
 
 
-def should_write(current_w: Optional[float], desired_w: int) -> bool:
-    """Only write when the change is worth an API call.
+def should_write(
+    current_w: Optional[float],
+    desired_w: int,
+    *,
+    now: Optional[datetime] = None,
+    last_write: Optional[datetime] = None,
+    min_interval: timedelta = MIN_WRITE_INTERVAL,
+    deadband_w: int = POWER_DEADBAND_W,
+) -> bool:
+    """Decide whether to push a new feed-in cap to the inverter.
 
-    The endpoint is rate-limited (the reason the staged Submit button exists),
-    so sub-step jitter must not generate traffic. Always writes when the
-    current value is unknown, and always honours an exact-zero command so
-    'target met' takes effect immediately.
+    Two independent brakes, because the settings endpoint is rate-limited and
+    the loop only needs to correct sustained drift, not track noise:
+
+      1. Deadband — ignore changes smaller than ``deadband_w``.
+      2. Rate limit — at most one write per ``min_interval`` (default 30 min).
+
+    Three cases deliberately BYPASS the rate limit, because delaying them by
+    up to half an hour would be visibly wrong:
+
+      * the current value is unknown (nothing staged yet — establish control)
+      * stopping (``desired_w == 0``), e.g. target met or window ending;
+        continuing to export for another 30 minutes would overshoot badly
+      * resuming from a stop (``current_w == 0`` with a live target), so a
+        window that opens just after a write isn't dead for 30 minutes
+
+    ``now``/``last_write`` are optional so callers that manage their own
+    timing (and the deadband-only tests) can omit them.
     """
     if current_w is None:
         return True
+
+    # Stop immediately; never sit at a non-zero cap when the answer is zero.
     if desired_w == 0:
         return current_w != 0
-    return abs(current_w - desired_w) >= MIN_POWER_STEP_W
+
+    # Start immediately when coming off a stop.
+    if current_w == 0:
+        return True
+
+    if abs(current_w - desired_w) < deadband_w:
+        return False
+
+    if now is not None and last_write is not None:
+        if now - last_write < min_interval:
+            return False
+
+    return True
